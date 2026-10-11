@@ -10,6 +10,103 @@ from sklearn.linear_model import RidgeCV
 
 st.set_page_config(page_title="AETHER Command Center", layout="wide", initial_sidebar_state="expanded")
 
+# --- CUSTOM THEME CONTROLS ---
+with st.sidebar.expander("🎨 Custom Theme Settings"):
+    st.write("Personalize your dashboard interface:")
+    bg_color = st.color_picker("Main Background Color", "#0b0f19")
+    sidebar_color = st.color_picker("Sidebar Background", "#111827")
+    accent_color = st.color_picker("Primary Accent Color", "#38bdf8")
+
+# --- INJECT DYNAMIC CSS ---
+st.markdown(f"""
+<style>
+    /* Main Background & Text */
+    .stApp {{
+        background-color: {bg_color};
+        color: #e0e6ed;
+    }}
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {{
+        background-color: {sidebar_color};
+        border-right: 1px solid #1f2937;
+    }}
+    
+    /* Headers */
+    h1, h2, h3, h4, h5, h6 {{
+        color: {accent_color} !important;
+        font-family: 'Inter', sans-serif;
+    }}
+    
+    /* Metrics */
+    [data-testid="stMetricValue"] {{
+        color: #34d399 !important;
+        font-weight: 700;
+    }}
+    [data-testid="stMetricLabel"] {{
+        color: #94a3b8 !important;
+        font-weight: 600;
+    }}
+    
+    /* Buttons */
+    .stButton>button, .stDownloadButton>button {{
+        background: linear-gradient(135deg, {accent_color}, #3b82f6) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        transition: all 0.3s ease !important;
+    }}
+    .stButton>button:hover, .stDownloadButton>button:hover {{
+        transform: scale(1.02);
+        box-shadow: 0 0 15px {accent_color}80;
+    }}
+    
+    /* File Uploader */
+    [data-testid="stFileUploadDropzone"] {{
+        border: 2px dashed {accent_color} !important;
+        background-color: {bg_color} !important;
+        border-radius: 10px !important;
+    }}
+    
+    /* Chat Messages */
+    [data-testid="chatAvatarIcon-user"] {{
+        background-color: {accent_color};
+    }}
+    [data-testid="chatAvatarIcon-assistant"] {{
+        background-color: #34d399;
+    }}
+    
+    /* Dividers */
+    hr {{
+        border-color: #1f2937 !important;
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+# --- UI TRANSLATION DICTIONARY ---
+def get_clean_feature_name(raw_name):
+    mapping = {
+        'iddq_0h': 'Initial Leakage',
+        'delay_0h': 'Initial Delay',
+        'resist_0h': 'Initial Resistance',
+        'iddq_24h': '24h Leakage',
+        'delay_24h': '24h Delay',
+        'resist_24h': '24h Resistance',
+        'iddq_drift': 'Leakage Drift',
+        'delay_drift': 'Delay Drift',
+        'resist_drift': 'Resistance Drift'
+    }
+    
+    parts = raw_name.split(' ')
+    clean_parts = [mapping.get(p, p) for p in parts]
+    
+    if len(clean_parts) == 2:
+        if clean_parts[0] == clean_parts[1]:
+            return f"{clean_parts[0]}²"
+        return f"{clean_parts[0]} × {clean_parts[1]}"
+    
+    return clean_parts[0]
+
 # --- CORE PIPELINE MODEL ---
 @st.cache_resource
 def train_production_model():
@@ -23,31 +120,75 @@ def train_production_model():
     
     poly = PolynomialFeatures(degree=2, include_bias=False)
     X_poly = poly.fit_transform(df_train[features])
-    feature_names = poly.get_feature_names_out(features)
+    
+    raw_feature_names = poly.get_feature_names_out(features)
+    clean_feature_names = [get_clean_feature_name(name) for name in raw_feature_names]
     
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_poly)
     
     model = RidgeCV(alphas=np.logspace(-3, 3, 10))
     model.fit(X_scaled, df_train['actual_final_drift'])
-    explainer = shap.LinearExplainer(model, X_scaled, feature_names=feature_names)
     
-    return model, poly, scaler, explainer, feature_names, features
+    explainer = shap.LinearExplainer(model, X_scaled, feature_names=clean_feature_names)
+    
+    return model, poly, scaler, explainer, clean_feature_names, features
 
 model, poly, scaler, explainer, feature_names, features = train_production_model()
 
 # --- UI SIDEBAR & UPLOADER ---
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/e/e5/NASA_logo.svg", width=100)
+    st.image("https://upload.wikimedia.org/wikipedia/commons/e/e5/NASA_logo.svg", width=120)
     st.title("AETHER-DPAT")
     st.markdown("### Telemetry Ingestion")
+    
+    template_df = pd.DataFrame({
+        'component_id': ['COMP_001', 'COMP_002'],
+        'iddq_0h': [4.55, 4.60],
+        'delay_0h': [1.20, 1.25],
+        'resist_0h': [0.80, 0.81],
+        'iddq_24h': [4.70, 4.90],
+        'delay_24h': [1.25, 1.35],
+        'resist_24h': [0.82, 0.88]
+    })
+    csv_template = template_df.to_csv(index=False).encode('utf-8')
+    
+    st.download_button(
+        label="📄 Download Data Template",
+        data=csv_template,
+        file_name='aether_telemetry_template.csv',
+        mime='text/csv',
+        help="Download this template to see the required column headers for your telemetry data."
+    )
+    
     uploaded_file = st.file_uploader("Upload CSV Batch", type=["csv"])
     st.divider()
-    usl_limit = st.slider("Iddq USL (µA) Limit", min_value=30.0, max_value=80.0, value=50.0, step=1.0)
+    usl_limit = st.slider("Leakage USL (µA) Limit", min_value=30.0, max_value=80.0, value=50.0, step=1.0)
     contamination_rate = st.slider("Module A Sensitivity", min_value=0.005, max_value=0.05, value=0.01, step=0.005)
 
+# --- DYNAMIC HOMEPAGE (Before Upload) ---
 if uploaded_file is None:
-    st.info("Awaiting telemetry data. Please upload your CSV batch (e.g., blind_test_batch.csv) in the sidebar.")
+    st.markdown("## Welcome to the AETHER-DPAT Inference Engine")
+    st.markdown("Upload a telemetry CSV batch in the sidebar to initiate real-time AI screening. While you wait, explore how the pipeline secures aerospace components:")
+    st.write("") 
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.image("https://images.unsplash.com/photo-1518770660439-4636190af475?ixlib=rb-4.0.3&auto=format&fit=crop&w=600&q=80", use_container_width=True)
+        st.markdown("### 1. The Gatekeeper")
+        st.caption("**Immediate Anomaly Isolation**")
+        st.write("Module A uses Mahalanobis DPAT and Isolation Forests to instantly reject components exhibiting extreme 24-hour sensor drift.")
+    with c2:
+        st.image("https://images.unsplash.com/photo-1581092160562-40aa08e78837?ixlib=rb-4.0.3&auto=format&fit=crop&w=600&q=80", use_container_width=True)
+        st.markdown("### 2. The Predictor")
+        st.caption("**Latent Defect Forecasting**")
+        st.write("Module B leverages Ridge Regression to predict 168-hour thermal runaway (TDDB) based on hidden physical correlations.")
+    with c3:
+        st.image("https://images.unsplash.com/photo-1550751827-4bd374c3f58b?ixlib=rb-4.0.3&auto=format&fit=crop&w=600&q=80", use_container_width=True)
+        st.markdown("### 3. Explainable AI")
+        st.caption("**Mathematical Transparency**")
+        st.write("Module C generates interactive SHAP waterfalls, proving the exact physics driving every AI rejection decision.")
+        
     st.stop()
 
 # --- DATA PROCESSING ---
@@ -107,7 +248,6 @@ with tab1:
         comp_idx = data.index[data['component_id'] == selected_comp].tolist()[0]
         comp_status = data.loc[comp_idx, 'Status']
         
-        # EXPLICIT STATUS DISPLAY
         with col_stat:
             st.markdown("### Final Verdict")
             if "Module B" in comp_status:
@@ -119,7 +259,6 @@ with tab1:
                 
         st.divider()
 
-        # DYNAMIC VISUALIZATIONS BASED ON STATUS
         if "Module B" in comp_status:
             valid_idx = valid_parts.reset_index().index[valid_parts['component_id'] == selected_comp].tolist()[0]
             
@@ -130,38 +269,36 @@ with tab1:
             
             fig = go.Figure(go.Waterfall(
                 orientation="h", measure=["relative"] * 10 + ["total"],
-                y=[feature_names[i] for i in sorted_idx] + ["Predicted Final Drift"],
+                y=[feature_names[i] for i in sorted_idx] + ["Predicted Final Leakage Drift"],
                 x=[sv[i] for i in sorted_idx] + [sum(sv)],
-                connector={"line": {"color": "rgb(63, 63, 63)"}},
+                connector={"line": {"color": "rgb(56, 189, 248)"}},
             ))
-            fig.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
+            fig.update_layout(height=400, margin=dict(l=20, r=20, t=20, b=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e0e6ed"))
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### Degradation Trajectory")
             traj_y = [valid_parts.loc[comp_idx, 'iddq_0h'], valid_parts.loc[comp_idx, 'iddq_24h'], valid_parts.loc[comp_idx, 'predicted_final_iddq']]
-            fig2 = go.Figure(data=go.Scatter(x=["0h", "24h", "168h (Predicted)"], y=traj_y, mode='lines+markers', marker=dict(size=10, color='red')))
-            fig2.add_hline(y=usl_limit, line_dash="dash", line_color="orange", annotation_text="Datasheet Failure Limit")
-            fig2.update_layout(height=300, yaxis_title="Leakage (µA)")
+            fig2 = go.Figure(data=go.Scatter(x=["0h", "24h", "168h (Predicted)"], y=traj_y, mode='lines+markers', marker=dict(size=12, color='#ef4444')))
+            fig2.add_hline(y=usl_limit, line_dash="dash", line_color="#f59e0b", annotation_text="Datasheet Failure Limit")
+            fig2.update_layout(height=350, yaxis_title="Current Leakage (µA)", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e0e6ed"))
             st.plotly_chart(fig2, use_container_width=True)
             
         else:
-            # Handle Module A and Healthy parts (which didn't go through SHAP)
             st.markdown("#### 24-Hour Telemetry Check")
             st.caption("Module B (SHAP) is only invoked for components that pass Module A. Here is the raw sensor data that led to this verdict:")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("0h Leakage", f"{data.loc[comp_idx, 'iddq_0h']:.2f} µA")
+            c1.metric("Initial Leakage", f"{data.loc[comp_idx, 'iddq_0h']:.2f} µA")
             c2.metric("24h Leakage", f"{data.loc[comp_idx, 'iddq_24h']:.2f} µA")
-            c3.metric("24h Drift", f"{data.loc[comp_idx, 'iddq_drift']:.2f} µA")
+            c3.metric("Total Leakage Drift", f"{data.loc[comp_idx, 'iddq_drift']:.2f} µA")
             
-            # Simple bar chart comparing this component's drift to the batch average
             fig3 = go.Figure(data=[
                 go.Bar(name='This Component', x=['Leakage Drift', 'Delay Drift', 'Resistance Drift'], 
-                       y=[data.loc[comp_idx, 'iddq_drift'], data.loc[comp_idx, 'delay_drift'], data.loc[comp_idx, 'resist_drift']]),
+                       y=[data.loc[comp_idx, 'iddq_drift'], data.loc[comp_idx, 'delay_drift'], data.loc[comp_idx, 'resist_drift']], marker_color='#38bdf8'),
                 go.Bar(name='Batch Average', x=['Leakage Drift', 'Delay Drift', 'Resistance Drift'], 
-                       y=[data['iddq_drift'].mean(), data['delay_drift'].mean(), data['resist_drift'].mean()])
+                       y=[data['iddq_drift'].mean(), data['delay_drift'].mean(), data['resist_drift'].mean()], marker_color='#34d399')
             ])
-            fig3.update_layout(barmode='group', height=350, title="Component Drift vs. Batch Average")
+            fig3.update_layout(barmode='group', height=400, title="Component Drift vs. Batch Average", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e0e6ed"))
             st.plotly_chart(fig3, use_container_width=True)
 
 with tab2:
@@ -170,27 +307,23 @@ with tab2:
     if selected_comp:
         comp_status = data.loc[data['component_id'] == selected_comp, 'Status'].values[0]
         
-        # Reset chat history if the user selects a new component
         if "messages" not in st.session_state or st.session_state.get('last_comp') != selected_comp:
             st.session_state.messages = []
             st.session_state.last_comp = selected_comp
             
-            # Auto-generate context
             if "Module B" in comp_status:
-                init_msg = f"Hello. {selected_comp} was rejected by Module B because my Ridge Regression model predicts it will suffer thermal runaway by 168h. Ask me why!"
+                init_msg = f"Hello. Component `{selected_comp}` was rejected by Module B because my Ridge Regression model predicts it will suffer thermal runaway by 168h. Ask me why!"
             elif "Module A" in comp_status:
-                init_msg = f"Hello. {selected_comp} was immediately isolated by the Gatekeeper (Module A) at 24h because its sensor readings were highly erratic compared to the rest of the batch. How can I help?"
+                init_msg = f"Hello. Component `{selected_comp}` was immediately isolated by the Gatekeeper (Module A) at 24h because its sensor readings were highly erratic compared to the rest of the batch. How can I help?"
             else:
-                init_msg = f"Hello. {selected_comp} is a perfectly healthy component. What would you like to know?"
+                init_msg = f"Hello. Component `{selected_comp}` is perfectly healthy. What would you like to know?"
             
             st.session_state.messages.append({"role": "assistant", "content": init_msg})
 
-        # Display history
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
-        # Chat Input
         if prompt := st.chat_input(f"Ask about {selected_comp}..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
@@ -199,22 +332,21 @@ with tab2:
             with st.chat_message("assistant"):
                 p = prompt.lower()
                 
-                # Smarter AI Logic
                 if "why" in p or "reason" in p:
                     if "Module B" in comp_status:
-                        response = f"While it looked fine at 24h, the interaction between its propagation delay and leakage drift mathematically aligned with the NASA Time-Dependent Dielectric Breakdown curve[cite: 1, 4]. It is on track to cross the {usl_limit}µA safety threshold."
+                        response = f"While it looked fine at 24h, the interaction between its propagation delay and leakage drift mathematically aligned with the NASA Time-Dependent Dielectric Breakdown curve. It is on track to cross the {usl_limit}µA safety threshold."
                     elif "Module A" in comp_status:
                         response = "It failed the Isolation Forest and Mahalanobis DPAT checks. Basically, its 24-hour sensor drift was so extreme that it mathematically fell into the top 1% of anomalies for this entire batch."
                     else:
-                        response = "It didn't fail! Its physics look perfectly stable and consistent with the baseline NASA reliability standards[cite: 1]."
+                        response = "It didn't fail! Its physics look perfectly stable and consistent with the baseline NASA reliability standards."
                 elif "risk" in p or "danger" in p:
                     if "Module B" in comp_status:
                         risk_val = valid_parts.loc[valid_parts['component_id'] == selected_comp, 'predicted_final_iddq'].values[0]
-                        response = f"The risk is severe. If placed in an aerospace system, it is projected to hit {risk_val:.2f} µA, which would cause an electrical short or thermal event[cite: 3, 5]."
+                        response = f"The risk is severe. If placed in an aerospace system, it is projected to hit {risk_val:.2f} µA, which would cause an electrical short or thermal event."
                     else:
                         response = "There is no severe risk predicted for this component."
                 else:
-                    response = f"I am monitoring the {comp_status} designation. My thermodynamic equations flag components that mimic the empirical failure profiles seen in the NASA PCOE datasets[cite: 1, 2]."
+                    response = f"I am monitoring the {comp_status} designation. My thermodynamic equations flag components that mimic the empirical failure profiles seen in the NASA PCOE datasets."
                 
                 st.write(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
